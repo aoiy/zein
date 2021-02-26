@@ -1,4 +1,5 @@
 import pandas as pd
+from datetime import datetime
 
 inputs = {
     "orderList": [
@@ -75,36 +76,47 @@ class LaborDispatch:
         self.order_list = input_dict['orderList']
         self.staff_list = input_dict['staffList']
         self.configs = input_dict['config']
-        self.order_df = pd.DataFrame(self.order_list)
-        self.staff_df = pd.DataFrame(self.staff_list)
+        self.order = None
+        self.staff = None
+        self.calender = None
         self.__preprocess()
 
     def __preprocess(self):
-        self.order_df = self.order_df.join(pd.DataFrame(self.order_df['workType'].values.tolist())).drop(
+        self.order = pd.DataFrame(self.order_list)
+        self.order = self.order.join(pd.DataFrame(self.order['workType'].values.tolist())).drop(
             'workType', axis=1)
-        self.order_df.set_index('orderId', inplace=True)
-        self.order_df[['orderDate', 'arrivalDate']] = self.order_df[['orderDate', 'arrivalDate']].apply(pd.to_datetime)
+        self.order.set_index('orderId', inplace=True)
+        self.order[['orderDate', 'arrivalDate']] = self.order[['orderDate', 'arrivalDate']].apply(pd.to_datetime)
+        self.order['expectEndDate'] = \
+            [self.order.loc[i, 'arrivalDate'] + pd.Timedelta(self.order.loc[i, 'expectDays'], unit='D')
+             for i in self.order.index]
 
-        self.staff_df = self.staff_df.join(pd.DataFrame(self.staff_df['ability'].values.tolist())).drop(
+        self.staff = pd.DataFrame(self.staff_list)
+        self.staff = self.staff.join(pd.DataFrame(self.staff['ability'].values.tolist())).drop(
             'ability', axis=1)
-        schedule = self.staff_df['schedule'].values.tolist()
+        schedule = self.staff['schedule'].values.tolist()
         schedule_reform = {(date, key): [value] for sche in schedule
                            for date, content in sche.items() for key, value in content.items()}
-        self.staff_df.columns = pd.MultiIndex.from_product([self.staff_df.columns, ['']])
-        self.staff_df = self.staff_df.join(pd.DataFrame(schedule_reform)).drop('schedule', axis=1, level=0)
-        self.staff_df.set_index('staffId', inplace=True)
+        self.staff.columns = pd.MultiIndex.from_product([self.staff.columns, ['']])
+        self.staff = self.staff.join(pd.DataFrame(schedule_reform)).drop('schedule', axis=1, level=0)
+        self.staff.set_index('staffId', inplace=True)
 
-        errand_days_sum = self.staff_df.totalErrandDays.sum()
-        errand_times_sum = self.staff_df.totalErrandTimes.sum()
-        dealt_device_sum = self.staff_df.totalDealtDevices.sum()
-        self.staff_df['workloadIndex'] = \
-            self.staff_df.totalErrandDays / errand_days_sum * self.configs['errandDaysWeight'] \
-            + self.staff_df.totalDealtDevices / dealt_device_sum * self.configs['deviceNumWeight'] \
-            + self.staff_df.totalErrandTimes / errand_times_sum * self.configs['errandTimesWeight']
+        errand_days_sum = self.staff.totalErrandDays.sum()
+        errand_times_sum = self.staff.totalErrandTimes.sum()
+        dealt_device_sum = self.staff.totalDealtDevices.sum()
+        self.staff['workloadIndex'] = \
+            self.staff.totalErrandDays / errand_days_sum * self.configs['errandDaysWeight'] \
+            + self.staff.totalDealtDevices / dealt_device_sum * self.configs['deviceNumWeight'] \
+            + self.staff.totalErrandTimes / errand_times_sum * self.configs['errandTimesWeight']
 
-    def staff_priority(self, workload_index, order_ss):
-        priority = workload_index
-        return
+        start_date = datetime.now().date()
+        end_date = self.order.expectEndDate.max().date()
+        date_range = pd.date_range(start_date, end_date)
+        self.calender = pd.DataFrame(index=self.order.index, columns=date_range)
+        for i in self.calender.index:
+            self.calender.loc[i, self.order.loc[i, 'arrivalDate']: self.order.loc[i, 'expectEndDate']] = 1
+        self.calender.fillna(0, inplace=True)
+        self.calender.columns = [date.date().isoformat() for date in self.calender.columns]
 
     def get_available_staff(self, order_ss):
         """
@@ -126,9 +138,9 @@ class LaborDispatch:
 
         available_staff = pd.DataFrame()
         for date, priority in arrival_dates:
-            conditions = (self.staff_df[date].workStatus == '公司') & \
-                         (~self.staff_df.staffName.isin(order_ss.exclusiveStaff))
-            avl_staff = self.staff_df[conditions]
+            conditions = (self.staff[date].workStatus == '公司') & \
+                         (~self.staff.staffName.isin(order_ss.exclusiveStaff))
+            avl_staff = self.staff[conditions]
             avl_staff['datePriorty'] = priority
             avl_staff.loc[:, (date, 'orderId')] = order_ss.name
             available_staff = available_staff.append(avl_staff)
@@ -154,15 +166,32 @@ class LaborDispatch:
         avl_staff.sort_values('workloadIndex', ascending=False, inplace=True)
         return avl_staff[:sent_num]
 
-    def dispatch(self):
+    def cal_priority(self, target_order, free_staff):
+        priority_matrix = pd.DataFrame(index=target_order, columns=free_staff)
+        return priority_matrix
 
-        matching = {order_id: None for order_id in self.order_df.index}
-        for order_id in self.order_df.index:
-            order_ss = self.order_df.loc[order_id, :]
-            prior_staff = self.get_prior_staff(order_ss)
-        return matching
+    def get_match(self, weight_matrix):
+        return 0
+
+    def dispatch(self):
+        cur_calender = self.calender.copy()
+        date_most_order = cur_calender.sum().idxmax()
+        date_order = cur_calender[date_most_order]
+        target_order = date_order[date_order == 1].index.tolist()
+
+        date_staff = self.staff[date_most_order]
+        free_staff = date_staff[date_staff['workStatus'] == '公司'].index.tolist()
+
+        priority_matrix =self.cal_priority(target_order, free_staff)
+        match = self.get_match(priority_matrix)
+
+        # matching = {order_id: None for order_id in self.order.index}
+        # for order_id in self.order.index:
+        #     order_ss = self.order.loc[order_id, :]
+        #     prior_staff = self.get_prior_staff(order_ss)
+        return free_staff
 
 
 if __name__ == '__main__':
     model = LaborDispatch(inputs)
-    assign_result = model.dispatch()
+    res = model.dispatch()
